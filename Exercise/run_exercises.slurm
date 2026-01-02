@@ -31,8 +31,39 @@ echo "=========================================="
 echo "Building exercises..."
 echo "=========================================="
 cd ../Examples
+
+# Add Exercise build.mk include to the build
 make clean
-make exercises
+make libraries
+
+# Build exercise files manually with proper includes
+EXERCISES_SRC="../Exercise"
+INCLUDE_DIR="build/include"
+LIB_DIR="build/lib"
+BIN_DIR="build/bin"
+OBJ_DIR="build/obj/exercises"
+
+mkdir -p ${OBJ_DIR}
+mkdir -p ${BIN_DIR}
+
+# Get BLAS flags
+BLAS_CFLAGS=$(pkg-config --cflags flexiblas)
+BLAS_LIBS=$(pkg-config --libs flexiblas)
+
+# Compile BLAS exercises (1.1, 1.2, 1.3)
+for ex in exercise_1_1 exercise_1_2 exercise_1_3; do
+    echo "Compiling ${ex}..."
+    gcc -c -O2 -Wall -I${INCLUDE_DIR} ${BLAS_CFLAGS} ${EXERCISES_SRC}/${ex}.c -o ${OBJ_DIR}/${ex}.o
+    gcc -O2 -Wall ${OBJ_DIR}/${ex}.o ${LIB_DIR}/libarray.a ${BLAS_LIBS} -lm -o ${BIN_DIR}/${ex}
+done
+
+# Compile MPI exercises (2.1, 2.2)
+for ex in exercise_2_1 exercise_2_2; do
+    echo "Compiling ${ex}..."
+    mpicc -c -O2 -Wall -I${INCLUDE_DIR} ${EXERCISES_SRC}/${ex}.c -o ${OBJ_DIR}/${ex}.o
+    mpicc -O2 -Wall ${OBJ_DIR}/${ex}.o ${LIB_DIR}/libarray.a ${LIB_DIR}/libmultiply.a -lm -o ${BIN_DIR}/${ex}
+done
+
 cd ../Exercise
 
 # Check if build was successful
