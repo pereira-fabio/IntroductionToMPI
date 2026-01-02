@@ -8,10 +8,10 @@
 #SBATCH --time=01:00:00
 #SBATCH --partition=batch
 
-# Load required modules for AION cluster
+# Load required modules for AION cluster (2023b release)
 module purge
-module load toolchain/foss/2023a
-module load lib/FlexiBLAS/3.3.1-GCC-12.3.0
+module load toolchain/foss/2023b
+module load lib/FlexiBLAS/3.3.1-GCC-13.2.0
 
 # Print job information
 echo "=========================================="
