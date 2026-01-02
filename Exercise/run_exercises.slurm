@@ -32,9 +32,17 @@ echo "Building exercises..."
 echo "=========================================="
 cd ../Examples
 
-# Add Exercise build.mk include to the build
+# Clean and build libraries (this also installs headers)
 make clean
 make libraries
+
+# Verify libraries and headers exist
+if [ ! -f "build/lib/libarray.a" ] || [ ! -f "build/include/array.h" ]; then
+    echo "ERROR: Libraries or headers not built correctly"
+    ls -la build/lib/ 2>/dev/null || echo "lib dir missing"
+    ls -la build/include/ 2>/dev/null || echo "include dir missing"
+    exit 1
+fi
 
 # Build exercise files manually with proper includes
 EXERCISES_SRC="../Exercise"
@@ -50,20 +58,41 @@ mkdir -p ${BIN_DIR}
 BLAS_CFLAGS=$(pkg-config --cflags flexiblas)
 BLAS_LIBS=$(pkg-config --libs flexiblas)
 
+echo "BLAS_CFLAGS: ${BLAS_CFLAGS}"
+echo "BLAS_LIBS: ${BLAS_LIBS}"
+echo "INCLUDE_DIR: ${INCLUDE_DIR}"
+
 # Compile BLAS exercises (1.1, 1.2, 1.3)
 for ex in exercise_1_1 exercise_1_2 exercise_1_3; do
     echo "Compiling ${ex}..."
     gcc -c -O2 -Wall -I${INCLUDE_DIR} ${BLAS_CFLAGS} ${EXERCISES_SRC}/${ex}.c -o ${OBJ_DIR}/${ex}.o
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to compile ${ex}.c"
+        exit 1
+    fi
     gcc -O2 -Wall ${OBJ_DIR}/${ex}.o ${LIB_DIR}/libarray.a ${BLAS_LIBS} -lm -o ${BIN_DIR}/${ex}
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to link ${ex}"
+        exit 1
+    fi
 done
 
 # Compile MPI exercises (2.1, 2.2)
 for ex in exercise_2_1 exercise_2_2; do
     echo "Compiling ${ex}..."
     mpicc -c -O2 -Wall -I${INCLUDE_DIR} ${EXERCISES_SRC}/${ex}.c -o ${OBJ_DIR}/${ex}.o
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to compile ${ex}.c"
+        exit 1
+    fi
     mpicc -O2 -Wall ${OBJ_DIR}/${ex}.o ${LIB_DIR}/libarray.a ${LIB_DIR}/libmultiply.a -lm -o ${BIN_DIR}/${ex}
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to link ${ex}"
+        exit 1
+    fi
 done
 
+echo "Build completed successfully."
 cd ../Exercise
 
 # Check if build was successful
