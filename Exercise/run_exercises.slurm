@@ -25,6 +25,24 @@ echo "=========================================="
 cd $SLURM_SUBMIT_DIR
 BUILD_DIR="../build/bin"
 
+# Build the exercises first
+echo ""
+echo "=========================================="
+echo "Building exercises..."
+echo "=========================================="
+cd ../Examples
+make clean
+make exercises
+cd ../Exercise
+
+# Check if build was successful
+if [ ! -f "${BUILD_DIR}/exercise_1_1" ]; then
+    echo "ERROR: Build failed. Executables not found."
+    exit 1
+fi
+
+echo "Build completed successfully."
+
 echo ""
 echo "=========================================="
 echo "Exercise 1.1: DAXPY and DDOT"
