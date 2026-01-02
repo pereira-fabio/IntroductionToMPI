@@ -8,7 +8,7 @@
 #include "array.h"
 
 static unsigned int const seed = 1234;
-static int const dimensions[] = {128*1, 128*2, 128*4, 128*8};
+static int const dimensions[] = {128*1, 128*2, 128*4, 128*8, 128*16};
 static int const n_dimensions = sizeof(dimensions)/sizeof(int);
 static double const epsilon = 1e-10;
 
@@ -108,16 +108,24 @@ static bool test_DDOT(int const n, BLAS_DDOT dot, double const epsilon, unsigned
     return result_is_correct;
 }
 
-// In the implementation of functions "DAXPY" and "DDOT" replace the call to
-// the corresponding BLAS function with your own implementation.
+// Implementation of DAXPY: y <- alpha*x + y
+// This follows the BLAS Level 1 operation pattern
 void DAXPY(int const n, double const alpha, double* const x, int const incx, double* const y, int const incy)
 {
-    cblas_daxpy(n, alpha, x, incx, y, incy);
+    for (int i = 0; i < n; i++) {
+        y[i * incy] = alpha * x[i * incx] + y[i * incy];
+    }
 }
 
+// Implementation of DDOT: c <- x^T * y (dot product)
+// This follows the BLAS Level 1 operation pattern
 double DDOT(int const n, double* const x, int const incx, double* const y, int const incy)
 {
-    return cblas_ddot(n, x, incx, y, incy);
+    double c = 0.0;
+    for (int i = 0; i < n; i++) {
+        c += x[i * incx] * y[i * incy];
+    }
+    return c;
 }
 
 static bool generate_operand_dimension(int* const n)

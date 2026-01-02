@@ -9,7 +9,7 @@
 #include "array.h"
 
 static unsigned int const seed = 1234;
-static int const dimensions[] = {32*1, 32*8, 32*64, 32*512};
+static int const dimensions[] = {128*1, 128*2, 128*4, 128*8, 128*16};
 static int const n_dimensions = sizeof(dimensions)/sizeof(int);
 static double const epsilon = 1e-10;
 
@@ -107,38 +107,48 @@ static bool test_DGEMV(int const m, int const n, BLAS_DGEMV dgemv, double const 
     return result_is_correct;
 }
 
-// In the implementation of functions "DGEMV" and "rowwise_DGEMV", replace the
-//  call to the BLAS function with your own implementation.
+// Implementation of DGEMV: y <- alpha*A*x + beta*y
+// Column-wise access pattern (j->i loop order) for optimal cache performance
+// with column-major storage. Inner loop performs AXPY-like operations.
 void DGEMV(
     int const m, int const n,
     double const alpha, double const* const A, int const ldA,
     double const* const x, int const incx,
     double const beta, double* const y, int const incy)
 {
-    CBLAS_LAYOUT const layout = CblasColMajor;
-    CBLAS_TRANSPOSE const transA = CblasNoTrans;
-
-    cblas_dgemv(layout, transA, 
-        m, n,
-        alpha, A, ldA,
-        x, incx,
-        beta, y, incy);
+    // First scale y by beta
+    for (int i = 0; i < m; i++) {
+        y[i * incy] = beta * y[i * incy];
+    }
+    
+    // Column-wise access: j->i loop order (AXPY pattern)
+    // Access columns of A sequentially (good for column-major storage)
+    for (int j = 0; j < n; j++) {
+        double const x_j = alpha * x[j * incx];
+        for (int i = 0; i < m; i++) {
+            y[i * incy] += A[i + j * ldA] * x_j;
+        }
+    }
 }
 
+// Implementation of rowwise_DGEMV: y <- alpha*A*x + beta*y
+// Row-wise access pattern (i->j loop order) using DOT product pattern.
+// Less efficient for column-major storage due to non-sequential memory access.
 void rowwise_DGEMV(
     int const m, int const n,
     double const alpha, double const* const A, int const ldA,
     double const* const x, int const incx,
     double const beta, double* const y, int const incy)
 {
-    CBLAS_LAYOUT const layout = CblasColMajor;
-    CBLAS_TRANSPOSE const transA = CblasNoTrans;
-
-    cblas_dgemv(layout, transA, 
-        m, n,
-        alpha, A, ldA,
-        x, incx,
-        beta, y, incy);
+    // Row-wise access: i->j loop order (DOT pattern)
+    // Each row computes a dot product with vector x
+    for (int i = 0; i < m; i++) {
+        double sum = 0.0;
+        for (int j = 0; j < n; j++) {
+            sum += A[i + j * ldA] * x[j * incx];
+        }
+        y[i * incy] = alpha * sum + beta * y[i * incy];
+    }
 }
 
 

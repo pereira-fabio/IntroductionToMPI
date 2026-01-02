@@ -9,7 +9,7 @@
 #include "array.h"
 
 static unsigned int const seed = 1234;
-static int const dimensions[] = {32*1, 32*4, 32*16, 32*32};
+static int const dimensions[] = {128*1, 128*2, 128*4, 128*8};
 static int const n_dimensions = sizeof(dimensions)/sizeof(int);
 static double const epsilon = 1e-10;
 
@@ -114,40 +114,54 @@ static bool test_DGEMM(int const m, int const n, int const k,
     return result_is_correct;
 }
 
-// In the implementation of functions "DGEMM" and "rowwise_DGEMM", replace the
-//  call to the BLAS function with your own implementation.
+// Implementation of DGEMM: C <- alpha*A*B + beta*C
+// Column-wise access pattern (j->l->i loop order) for optimal cache performance
+// with column-major storage. Inner loop performs AXPY-like operations on columns.
 void DGEMM(
     int const m, int const n, int const k,
     double const alpha, double const* const A,
     int const ldA, double const* const B, int const ldB,
     double const beta, double* const C, int const ldC)
 {
-    CBLAS_LAYOUT const layout = CblasColMajor;
-    CBLAS_TRANSPOSE const transA = CblasNoTrans;
-    CBLAS_TRANSPOSE const transB = CblasNoTrans;
-
-    cblas_dgemm(layout, transA, transB,
-        m, n, k,
-        alpha, A, ldA,
-        B, ldB,
-        beta, C, ldC);
+    // First scale C by beta
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < m; i++) {
+            C[i + j * ldC] = beta * C[i + j * ldC];
+        }
+    }
+    
+    // j->l->i loop order (AXPY pattern in innermost loop)
+    // This accesses A column-wise which is optimal for column-major storage
+    for (int j = 0; j < n; j++) {
+        for (int l = 0; l < k; l++) {
+            double const b_lj = alpha * B[l + j * ldB];
+            for (int i = 0; i < m; i++) {
+                C[i + j * ldC] += A[i + l * ldA] * b_lj;
+            }
+        }
+    }
 }
 
+// Implementation of rowwise_DGEMM: C <- alpha*A*B + beta*C
+// Row-wise access pattern (j->i->l loop order) accessing A row-wise.
+// Less efficient for column-major storage due to strided memory access in A.
 void rowwise_DGEMM(
     int const m, int const n, int const k,
     double const alpha, double const* const A,
     int const ldA, double const* const B, int const ldB,
     double const beta, double* const C, int const ldC)
 {
-    CBLAS_LAYOUT const layout = CblasColMajor;
-    CBLAS_TRANSPOSE const transA = CblasNoTrans;
-    CBLAS_TRANSPOSE const transB = CblasNoTrans;
-
-    cblas_dgemm(layout, transA, transB,
-        m, n, k,
-        alpha, A, ldA,
-        B, ldB,
-        beta, C, ldC);
+    // j->i->l loop order (DOT pattern in innermost loop)
+    // This accesses A row-wise which is suboptimal for column-major storage
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < m; i++) {
+            double sum = 0.0;
+            for (int l = 0; l < k; l++) {
+                sum += A[i + l * ldA] * B[l + j * ldB];
+            }
+            C[i + j * ldC] = alpha * sum + beta * C[i + j * ldC];
+        }
+    }
 }
 
 
