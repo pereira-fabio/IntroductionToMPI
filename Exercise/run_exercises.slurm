@@ -36,6 +36,11 @@ cd ../Examples
 make clean
 make libraries
 
+# Manually install headers since make libraries doesn't do it
+mkdir -p build/include
+cp utils/array.h build/include/
+cp utils/multiply.h build/include/
+
 # Verify libraries and headers exist
 if [ ! -f "build/lib/libarray.a" ] || [ ! -f "build/include/array.h" ]; then
     echo "ERROR: Libraries or headers not built correctly"
