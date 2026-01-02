@@ -23,7 +23,7 @@ echo "=========================================="
 
 # Set working directory
 cd $SLURM_SUBMIT_DIR
-BUILD_DIR="../build/bin"
+BUILD_DIR="../Examples/build/bin"
 
 # Build the exercises first
 echo ""
