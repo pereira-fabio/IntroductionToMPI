@@ -62,8 +62,9 @@ static bool test_muptiply(int const m, int const k, int const n, GEMM gemm, doub
 
 // Implementation of parallel matrix multiplication using dynamic distribution
 // of operands (simplified row-wise Cannon's algorithm).
-// Both A (row bands) and B (column bands) are distributed, then A bands
-// are rotated among processes during computation.
+// A is distributed in row bands, B is distributed in column bands.
+// Each process computes a full row of C blocks by rotating its A band
+// and receiving B bands from other processes.
 void parallel_gemm(
     int const m, int const k, int const n,
     double const* const A, double const* const B, double* const C)
@@ -72,157 +73,142 @@ void parallel_gemm(
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    // Calculate local dimensions
+    // For simplicity, we use a 1D decomposition where each process gets
+    // a band of rows from A and computes the corresponding rows of C
     int const rows_per_proc = m / size;
-    int const cols_per_proc = n / size;
     int const local_m = (rank < size - 1) ? rows_per_proc : (m - rows_per_proc * (size - 1));
-    int const local_n = (rank < size - 1) ? cols_per_proc : (n - cols_per_proc * (size - 1));
+    int const start_row = rank * rows_per_proc;
     
-    // Allocate local storage
-    // Each process holds a horizontal band of A and a vertical band of B
-    double* local_A = allocate_2d_double_blocked(local_m, k);
-    double* local_A_recv = allocate_2d_double_blocked(rows_per_proc + (m % size), k); // Buffer for received A
-    double* local_B = allocate_2d_double_blocked(k, local_n);
-    double* local_C = allocate_2d_double_blocked(local_m, local_n);
+    // Each process needs: local rows of A, and will receive bands of B
+    // B is divided into column bands for rotation
+    int const cols_per_proc = n / size;
+    
+    // Allocate storage
+    double* local_A = allocate_2d_double_blocked(local_m, k);  // My rows of A
+    double* local_B = allocate_2d_double_blocked(k, cols_per_proc + (n % size));  // Current B band
+    double* local_B_recv = allocate_2d_double_blocked(k, cols_per_proc + (n % size));  // Buffer for receiving B
+    double* local_C = allocate_2d_double_blocked(local_m, n);  // My rows of C (full width)
     
     // Initialize local_C to zero
-    for (int i = 0; i < local_m * local_n; i++) {
+    for (int i = 0; i < local_m * n; i++) {
         local_C[i] = 0.0;
     }
     
-    // Distribute A (row bands) and B (column bands) from root
+    // Distribute rows of A from root
     if (rank == 0) {
-        // Distribute row bands of A
-        for (int p = 0; p < size; p++) {
-            int const p_local_m = (p < size - 1) ? rows_per_proc : (m - rows_per_proc * (size - 1));
-            int const start_row = p * rows_per_proc;
-            if (p == 0) {
-                // Copy rows of A for rank 0 (column-major: non-contiguous rows)
-                for (int j = 0; j < k; j++) {
-                    for (int i = 0; i < local_m; i++) {
-                        local_A[i + j * local_m] = A[start_row + i + j * m];
-                    }
-                }
-            } else {
-                // Pack and send rows of A
-                double* send_buf = allocate_2d_double_blocked(p_local_m, k);
-                for (int j = 0; j < k; j++) {
-                    for (int i = 0; i < p_local_m; i++) {
-                        send_buf[i + j * p_local_m] = A[start_row + i + j * m];
-                    }
-                }
-                MPI_Send(send_buf, p_local_m * k, MPI_DOUBLE, p, 0, MPI_COMM_WORLD);
-                send_buf = free_2d_double_blocked(send_buf);
+        // Copy my rows of A
+        for (int j = 0; j < k; j++) {
+            for (int i = 0; i < local_m; i++) {
+                local_A[i + j * local_m] = A[i + j * m];
             }
         }
-        // Distribute column bands of B
-        for (int p = 0; p < size; p++) {
-            int const p_local_n = (p < size - 1) ? cols_per_proc : (n - cols_per_proc * (size - 1));
-            int const start_col = p * cols_per_proc;
-            if (p == 0) {
-                for (int j = 0; j < local_n; j++) {
-                    for (int i = 0; i < k; i++) {
-                        local_B[i + j * k] = B[i + (start_col + j) * k];
-                    }
+        // Send rows to other processes
+        for (int p = 1; p < size; p++) {
+            int const p_local_m = (p < size - 1) ? rows_per_proc : (m - rows_per_proc * (size - 1));
+            int const p_start_row = p * rows_per_proc;
+            double* send_buf = allocate_2d_double_blocked(p_local_m, k);
+            for (int j = 0; j < k; j++) {
+                for (int i = 0; i < p_local_m; i++) {
+                    send_buf[i + j * p_local_m] = A[p_start_row + i + j * m];
                 }
-            } else {
-                MPI_Send(&B[start_col * k], p_local_n * k, MPI_DOUBLE, p, 1, MPI_COMM_WORLD);
             }
+            MPI_Send(send_buf, p_local_m * k, MPI_DOUBLE, p, 0, MPI_COMM_WORLD);
+            send_buf = free_2d_double_blocked(send_buf);
         }
     } else {
-        // Receive row band of A
         MPI_Recv(local_A, local_m * k, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        // Receive column band of B
-        MPI_Recv(local_B, local_n * k, MPI_DOUBLE, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
     
-    // Cannon's algorithm: rotate A bands and accumulate partial products
-    // Each process computes C[rank_row, rank_col] by receiving different A bands
+    // Distribute initial B bands - each process p gets column band p
+    if (rank == 0) {
+        // Copy my B band (columns 0 to cols_per_proc-1)
+        int const my_local_n = cols_per_proc;
+        for (int j = 0; j < my_local_n; j++) {
+            for (int i = 0; i < k; i++) {
+                local_B[i + j * k] = B[i + j * k];
+            }
+        }
+        // Send B bands to other processes
+        for (int p = 1; p < size; p++) {
+            int const p_local_n = (p < size - 1) ? cols_per_proc : (n - cols_per_proc * (size - 1));
+            int const p_start_col = p * cols_per_proc;
+            MPI_Send(&B[p_start_col * k], k * p_local_n, MPI_DOUBLE, p, 1, MPI_COMM_WORLD);
+        }
+    } else {
+        int const my_local_n = (rank < size - 1) ? cols_per_proc : (n - cols_per_proc * (size - 1));
+        MPI_Recv(local_B, k * my_local_n, MPI_DOUBLE, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
+    
+    // Ring communication for rotating B bands
     int const prev_rank = (rank - 1 + size) % size;
     int const next_rank = (rank + 1) % size;
     
-    // Current A band info
-    int current_A_owner = rank;
-    int current_local_m = local_m;
+    // Current B band owner (determines which columns of C we're computing)
+    int current_B_owner = rank;
     
     for (int step = 0; step < size; step++) {
-        // Compute partial product with current A band
-        // We need to multiply the A band (owned by current_A_owner) with our B band
-        // and add to the corresponding part of C
+        // Compute partial product: local_C[:, B_cols] += local_A * local_B
+        int const B_start_col = current_B_owner * cols_per_proc;
+        int const B_local_n = (current_B_owner < size - 1) ? cols_per_proc : (n - cols_per_proc * (size - 1));
         
-        // Determine which rows of C this contributes to
-        int const A_start_row = current_A_owner * rows_per_proc;
-        int const A_local_m = (current_A_owner < size - 1) ? rows_per_proc : (m - rows_per_proc * (size - 1));
-        
-        // Compute: partial_C = local_A * local_B
-        for (int j = 0; j < local_n; j++) {
+        // Matrix multiplication: C[my_rows, B_cols] = A[my_rows, :] * B[:, B_cols]
+        for (int j = 0; j < B_local_n; j++) {
             for (int l = 0; l < k; l++) {
                 double const b_lj = local_B[l + j * k];
-                for (int i = 0; i < A_local_m; i++) {
-                    // Accumulate into local_C if this is our row band
-                    if (current_A_owner == rank) {
-                        local_C[i + j * local_m] += local_A[i + l * A_local_m] * b_lj;
-                    }
+                for (int i = 0; i < local_m; i++) {
+                    local_C[i + (B_start_col + j) * local_m] += local_A[i + l * local_m] * b_lj;
                 }
             }
         }
         
-        // Rotate A band to next process (except on last step)
+        // Rotate B band to next process (except on last step)
         if (step < size - 1) {
-            int const send_size = A_local_m * k;
-            int const recv_owner = (current_A_owner - 1 + size) % size;
-            int const recv_local_m = (recv_owner < size - 1) ? rows_per_proc : (m - rows_per_proc * (size - 1));
-            int const recv_size = recv_local_m * k;
+            int const send_local_n = B_local_n;
+            int const next_B_owner = (current_B_owner - 1 + size) % size;
+            int const recv_local_n = (next_B_owner < size - 1) ? cols_per_proc : (n - cols_per_proc * (size - 1));
             
-            MPI_Sendrecv(local_A, send_size, MPI_DOUBLE, next_rank, 2,
-                         local_A_recv, recv_size, MPI_DOUBLE, prev_rank, 2,
+            MPI_Sendrecv(local_B, k * send_local_n, MPI_DOUBLE, next_rank, 2,
+                         local_B_recv, k * recv_local_n, MPI_DOUBLE, prev_rank, 2,
                          MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             
             // Swap buffers
-            double* temp = local_A;
-            local_A = local_A_recv;
-            local_A_recv = temp;
+            double* temp = local_B;
+            local_B = local_B_recv;
+            local_B_recv = temp;
             
-            current_A_owner = recv_owner;
-            current_local_m = recv_local_m;
+            current_B_owner = next_B_owner;
         }
     }
     
     // Gather results back to root process
     if (rank == 0) {
-        // Copy local C for rank 0
-        for (int j = 0; j < local_n; j++) {
+        // Copy my rows of C
+        for (int j = 0; j < n; j++) {
             for (int i = 0; i < local_m; i++) {
                 C[i + j * m] = local_C[i + j * local_m];
             }
         }
-        // Receive C from other processes
+        // Receive rows from other processes
         for (int p = 1; p < size; p++) {
             int const p_local_m = (p < size - 1) ? rows_per_proc : (m - rows_per_proc * (size - 1));
-            int const p_local_n = (p < size - 1) ? cols_per_proc : (n - cols_per_proc * (size - 1));
-            int const start_row = p * rows_per_proc;
-            int const start_col = p * cols_per_proc;
-            
-            double* recv_buf = allocate_2d_double_blocked(p_local_m, p_local_n);
-            MPI_Recv(recv_buf, p_local_m * p_local_n, MPI_DOUBLE, p, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            
-            // Unpack into C
-            for (int j = 0; j < p_local_n; j++) {
+            int const p_start_row = p * rows_per_proc;
+            double* recv_buf = allocate_2d_double_blocked(p_local_m, n);
+            MPI_Recv(recv_buf, p_local_m * n, MPI_DOUBLE, p, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            for (int j = 0; j < n; j++) {
                 for (int i = 0; i < p_local_m; i++) {
-                    C[start_row + i + (start_col + j) * m] = recv_buf[i + j * p_local_m];
+                    C[p_start_row + i + j * m] = recv_buf[i + j * p_local_m];
                 }
             }
             recv_buf = free_2d_double_blocked(recv_buf);
         }
     } else {
-        // Send local C to root
-        MPI_Send(local_C, local_m * local_n, MPI_DOUBLE, 0, 3, MPI_COMM_WORLD);
+        MPI_Send(local_C, local_m * n, MPI_DOUBLE, 0, 3, MPI_COMM_WORLD);
     }
     
     // Free local storage
     local_A = free_2d_double_blocked(local_A);
-    local_A_recv = free_2d_double_blocked(local_A_recv);
     local_B = free_2d_double_blocked(local_B);
+    local_B_recv = free_2d_double_blocked(local_B_recv);
     local_C = free_2d_double_blocked(local_C);
 }
 
